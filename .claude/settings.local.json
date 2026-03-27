@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm run:*)",
+      "Bash(ls -la /Users/jasonxu/AimiClaw-main/node_modules/.pnpm/openclaw@2026.3.13_*/node_modules/openclaw/dist/)",
+      "Bash(find:*)",
+      "Bash(ls -1 /Users/jasonxu/AimiClaw-main/node_modules/.pnpm/openclaw@2026.3.13_*/node_modules/openclaw/dist/)",
+      "Bash(grep -l chat.send /Users/jasonxu/AimiClaw-main/node_modules/.pnpm/openclaw@2026.3.13_@discordjs+opus@0.10.0_encoding@0.1.13__@napi-rs+canvas@0.1.95_@type_0f635f615c55026be72026ecc8553f11/node_modules/openclaw/dist/*.js)",
+      "Bash(grep:*)",
+      "Bash(git checkout:*)",
+      "Bash(hdiutil detach:*)",
+      "Bash(hdiutil attach:*)",
+      "Read(//private/tmp/dmg-check/**)"
+    ]
+  }
+}
