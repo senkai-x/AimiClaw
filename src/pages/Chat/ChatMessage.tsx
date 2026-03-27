@@ -91,14 +91,27 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Thinking section */}
         {visibleThinking && (
-          <ThinkingBlock content={visibleThinking} />
+          <div className="animate-in fade-in-0 slide-in-from-top-1 duration-200">
+            <ThinkingBlock content={visibleThinking} />
+          </div>
         )}
 
         {/* Tool use cards */}
         {visibleTools.length > 0 && (
           <div className="space-y-1">
             {visibleTools.map((tool, i) => (
-              <ToolCard key={tool.id || i} name={tool.name} input={tool.input} />
+              <div
+                key={tool.id || i}
+                className={cn(
+                  'animate-in fade-in-0 slide-in-from-top-1 duration-200',
+                  i === 0 && 'delay-75',
+                  i === 1 && 'delay-150',
+                  i === 2 && 'delay-200',
+                  i >= 3 && 'delay-300',
+                )}
+              >
+                <ToolCard name={tool.name} input={tool.input} />
+              </div>
             ))}
           </div>
         )}
