@@ -169,6 +169,32 @@ function clearHistoryPoll(): void {
   }
 }
 
+function scheduleHistoryPoll(delayMs = HISTORY_POLL_SILENCE_WINDOW_MS): void {
+  clearHistoryPoll();
+  _historyPollTimer = setTimeout(async () => {
+    _historyPollTimer = null;
+    const state = useChatStore.getState();
+    if (!state.sending) return;
+
+    // If we recently received an event, postpone polling until the stream
+    // goes silent again. This avoids noisy refreshes when streaming is healthy.
+    if (Date.now() - _lastChatEventAt < HISTORY_POLL_SILENCE_WINDOW_MS) {
+      scheduleHistoryPoll(HISTORY_POLL_SILENCE_WINDOW_MS);
+      return;
+    }
+
+    try {
+      await state.loadHistory(true);
+    } catch {
+      // Ignore polling errors and keep polling while sending.
+    }
+
+    if (useChatStore.getState().sending) {
+      scheduleHistoryPoll(HISTORY_POLL_SILENCE_WINDOW_MS);
+    }
+  }, Math.max(250, delayMs));
+}
+
 function pruneChatEventDedupe(now: number): void {
   for (const [key, ts] of _chatEventDedupe.entries()) {
     if (now - ts > CHAT_EVENT_DEDUPE_TTL_MS) {
@@ -1737,7 +1763,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Create new session if pendingNewSession flag is set
     let currentSessionKey = get().currentSessionKey;
     if (get().pendingNewSession) {
-      const { sessions, sessionLabels, sessionLastActivity } = get();
+      const { sessions } = get();
       const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
         ?? getCanonicalPrefixFromSessions(sessions)
         ?? DEFAULT_CANONICAL_PREFIX;
@@ -1804,9 +1830,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
     // Start the safety timeout - do NOT use history polling to avoid
-    // sudden jumps when displaying the complete conversation process
+    // sudden jumps when displaying the complete conversation process.
+    // We still keep a low-frequency fallback poll so intermediate tool turns
+    // can surface when the Gateway doesn't stream them in real time.
     _lastChatEventAt = Date.now();
-    clearHistoryPoll();
+    scheduleHistoryPoll();
     clearErrorRecoveryTimer();
 
     const SAFETY_TIMEOUT_MS = 90_000;
@@ -1968,6 +1996,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!sending && runId) {
         set({ sending: true, activeRunId: runId, error: null });
       }
+      // Keep fallback polling armed for silent periods between sparse events.
+      scheduleHistoryPoll();
     }
 
     switch (resolvedState) {
@@ -2118,6 +2148,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // New message - add it and end if this is final output
             if (hasOutput) {
               clearHistoryPoll();
+              // Quietly reload history after the final answer so any
+              // intermediate thinking/tool turns from the Gateway's
+              // authoritative transcript are surfaced automatically.
+              void get().loadHistory(true);
               return {
                 messages: [...s.messages, msgWithImages],
                 streamingText: '',
