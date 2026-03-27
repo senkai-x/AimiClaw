@@ -169,6 +169,32 @@ function clearHistoryPoll(): void {
   }
 }
 
+function scheduleHistoryPoll(delayMs = HISTORY_POLL_SILENCE_WINDOW_MS): void {
+  clearHistoryPoll();
+  _historyPollTimer = setTimeout(async () => {
+    _historyPollTimer = null;
+    const state = useChatStore.getState();
+    if (!state.sending) return;
+
+    // If we recently received an event, postpone polling until the stream
+    // goes silent again. This avoids noisy refreshes when streaming is healthy.
+    if (Date.now() - _lastChatEventAt < HISTORY_POLL_SILENCE_WINDOW_MS) {
+      scheduleHistoryPoll(HISTORY_POLL_SILENCE_WINDOW_MS);
+      return;
+    }
+
+    try {
+      await state.loadHistory(true);
+    } catch {
+      // Ignore polling errors and keep polling while sending.
+    }
+
+    if (useChatStore.getState().sending) {
+      scheduleHistoryPoll(HISTORY_POLL_SILENCE_WINDOW_MS);
+    }
+  }, Math.max(250, delayMs));
+}
+
 function pruneChatEventDedupe(now: number): void {
   for (const [key, ts] of _chatEventDedupe.entries()) {
     if (now - ts > CHAT_EVENT_DEDUPE_TTL_MS) {
@@ -936,6 +962,143 @@ function summarizeToolOutput(text: string): string | undefined {
   return summary;
 }
 
+function mergeChunkText(previous: string, incoming: string): string {
+  const prev = previous ?? '';
+  const next = incoming ?? '';
+  if (!prev) return next;
+  if (!next) return prev;
+  if (next.startsWith(prev)) return next;
+  if (prev.startsWith(next)) return prev;
+  if (prev.includes(next)) return prev;
+  if (next.includes(prev)) return next;
+  return `${prev}${next}`;
+}
+
+function mergeToolCalls(
+  previousCalls: unknown,
+  incomingCalls: unknown,
+): Array<Record<string, unknown>> | undefined {
+  const prev = Array.isArray(previousCalls) ? previousCalls as Array<Record<string, unknown>> : [];
+  const next = Array.isArray(incomingCalls) ? incomingCalls as Array<Record<string, unknown>> : [];
+  if (next.length === 0) return prev.length > 0 ? prev : undefined;
+  if (prev.length === 0) return next;
+
+  const merged = [...prev];
+  for (const call of next) {
+    const callId = typeof call.id === 'string' ? call.id : '';
+    const fn = (call.function && typeof call.function === 'object')
+      ? call.function as Record<string, unknown>
+      : call;
+    const fnName = typeof fn.name === 'string' ? fn.name : '';
+
+    const existingIndex = merged.findIndex((item) => {
+      const itemId = typeof item.id === 'string' ? item.id : '';
+      const itemFn = (item.function && typeof item.function === 'object')
+        ? item.function as Record<string, unknown>
+        : item;
+      const itemName = typeof itemFn.name === 'string' ? itemFn.name : '';
+      return (callId && itemId === callId) || (!!fnName && itemName === fnName);
+    });
+
+    if (existingIndex < 0) {
+      merged.push(call);
+      continue;
+    }
+
+    const existing = merged[existingIndex];
+    const existingFn = (existing.function && typeof existing.function === 'object')
+      ? existing.function as Record<string, unknown>
+      : existing;
+    const nextFn = (call.function && typeof call.function === 'object')
+      ? call.function as Record<string, unknown>
+      : call;
+    const existingArgs = typeof existingFn.arguments === 'string' ? existingFn.arguments : '';
+    const nextArgs = typeof nextFn.arguments === 'string' ? nextFn.arguments : '';
+    const mergedArgs = mergeChunkText(existingArgs, nextArgs);
+
+    const mergedFn = {
+      ...existingFn,
+      ...nextFn,
+      ...(mergedArgs ? { arguments: mergedArgs } : {}),
+    };
+    merged[existingIndex] = {
+      ...existing,
+      ...call,
+      function: mergedFn,
+    };
+  }
+
+  return merged;
+}
+
+function mergeStreamingMessage(
+  previousMessage: unknown,
+  incomingMessage: unknown,
+): unknown {
+  if (!incomingMessage || typeof incomingMessage !== 'object') return previousMessage;
+  if (!previousMessage || typeof previousMessage !== 'object') return incomingMessage;
+
+  const prev = previousMessage as Record<string, unknown>;
+  const incoming = incomingMessage as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...prev, ...incoming };
+
+  const prevContent = prev.content;
+  const incomingContent = incoming.content;
+
+  if (typeof prevContent === 'string' && typeof incomingContent === 'string') {
+    merged.content = mergeChunkText(prevContent, incomingContent);
+  } else if (Array.isArray(prevContent) && Array.isArray(incomingContent)) {
+    const nextBlocks = [...prevContent] as ContentBlock[];
+    for (const incomingBlock of incomingContent as ContentBlock[]) {
+      const blockKey = `${incomingBlock.type || ''}|${incomingBlock.id || ''}|${incomingBlock.name || ''}`;
+      const existingIndex = nextBlocks.findIndex((block) => (
+        `${block.type || ''}|${block.id || ''}|${block.name || ''}` === blockKey
+      ));
+
+      if (existingIndex < 0) {
+        nextBlocks.push(incomingBlock);
+        continue;
+      }
+
+      const existing = nextBlocks[existingIndex];
+      if (incomingBlock.type === 'text') {
+        nextBlocks[existingIndex] = {
+          ...existing,
+          ...incomingBlock,
+          text: mergeChunkText(existing.text || '', incomingBlock.text || ''),
+        };
+      } else if (incomingBlock.type === 'thinking') {
+        nextBlocks[existingIndex] = {
+          ...existing,
+          ...incomingBlock,
+          thinking: mergeChunkText(existing.thinking || '', incomingBlock.thinking || ''),
+        };
+      } else if (incomingBlock.type === 'tool_use' || incomingBlock.type === 'toolCall') {
+        const existingArgs = existing.arguments ?? existing.input;
+        const incomingArgs = incomingBlock.arguments ?? incomingBlock.input;
+        nextBlocks[existingIndex] = {
+          ...existing,
+          ...incomingBlock,
+          input: incomingBlock.input ?? existing.input ?? incomingArgs ?? existingArgs,
+          arguments: incomingBlock.arguments ?? existing.arguments ?? incomingArgs ?? existingArgs,
+        };
+      } else {
+        nextBlocks[existingIndex] = { ...existing, ...incomingBlock };
+      }
+    }
+    merged.content = nextBlocks;
+  } else if (incomingContent === undefined) {
+    merged.content = prevContent;
+  }
+
+  const mergedToolCalls = mergeToolCalls(prev.tool_calls ?? prev.toolCalls, incoming.tool_calls ?? incoming.toolCalls);
+  if (mergedToolCalls) {
+    merged.tool_calls = mergedToolCalls;
+  }
+
+  return merged;
+}
+
 function normalizeToolStatus(rawStatus: unknown, fallback: 'running' | 'completed'): ToolStatus['status'] {
   const status = typeof rawStatus === 'string' ? rawStatus.toLowerCase() : '';
   if (status === 'error' || status === 'failed') return 'error';
@@ -1600,7 +1763,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Create new session if pendingNewSession flag is set
     let currentSessionKey = get().currentSessionKey;
     if (get().pendingNewSession) {
-      const { sessions, sessionLabels, sessionLastActivity } = get();
+      const { sessions } = get();
       const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
         ?? getCanonicalPrefixFromSessions(sessions)
         ?? DEFAULT_CANONICAL_PREFIX;
@@ -1667,9 +1830,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
     // Start the safety timeout - do NOT use history polling to avoid
-    // sudden jumps when displaying the complete conversation process
+    // sudden jumps when displaying the complete conversation process.
+    // We still keep a low-frequency fallback poll so intermediate tool turns
+    // can surface when the Gateway doesn't stream them in real time.
     _lastChatEventAt = Date.now();
-    clearHistoryPoll();
+    scheduleHistoryPoll();
     clearErrorRecoveryTimer();
 
     const SAFETY_TIMEOUT_MS = 90_000;
@@ -1831,6 +1996,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!sending && runId) {
         set({ sending: true, activeRunId: runId, error: null });
       }
+      // Keep fallback polling armed for silent periods between sparse events.
+      scheduleHistoryPoll();
     }
 
     switch (resolvedState) {
@@ -1858,7 +2025,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const msgRole = (event.message as RawMessage).role;
               if (isToolResultRole(msgRole)) return s.streamingMessage;
             }
-            return event.message ?? s.streamingMessage;
+            return mergeStreamingMessage(s.streamingMessage, event.message ?? s.streamingMessage);
           })(),
           streamingTools: updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools,
         }));
@@ -1981,6 +2148,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // New message - add it and end if this is final output
             if (hasOutput) {
               clearHistoryPoll();
+              // Quietly reload history after the final answer so any
+              // intermediate thinking/tool turns from the Gateway's
+              // authoritative transcript are surfaced automatically.
+              void get().loadHistory(true);
               return {
                 messages: [...s.messages, msgWithImages],
                 streamingText: '',

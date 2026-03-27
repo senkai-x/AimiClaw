@@ -91,14 +91,27 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Thinking section */}
         {visibleThinking && (
-          <ThinkingBlock content={visibleThinking} />
+          <div className="animate-in fade-in-0 slide-in-from-top-1 duration-200">
+            <ThinkingBlock content={visibleThinking} />
+          </div>
         )}
 
         {/* Tool use cards */}
         {visibleTools.length > 0 && (
           <div className="space-y-1">
             {visibleTools.map((tool, i) => (
-              <ToolCard key={tool.id || i} name={tool.name} input={tool.input} />
+              <div
+                key={tool.id || i}
+                className={cn(
+                  'animate-in fade-in-0 slide-in-from-top-1 duration-200',
+                  i === 0 && 'delay-75',
+                  i === 1 && 'delay-150',
+                  i === 2 && 'delay-200',
+                  i >= 3 && 'delay-300',
+                )}
+              >
+                <ToolCard name={tool.name} input={tool.input} />
+              </div>
             ))}
           </div>
         )}
@@ -426,7 +439,7 @@ function MessageBubble({
 // ── Thinking Block ──────────────────────────────────────────────
 
 function ThinkingBlock({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(true);  // 默认展开以实时显示思考过程
+  const [expanded, setExpanded] = useState(false);  // 默认收起，避免大段思考内容突然铺满界面
 
   return (
     <div className="w-full rounded-xl border border-purple-500/20 bg-purple-500/5 dark:bg-purple-500/10 text-[14px]">
@@ -638,7 +651,7 @@ function ImageLightbox({
 // ── Tool Card ───────────────────────────────────────────────────
 
 function ToolCard({ name, input }: { name: string; input: unknown }) {
-  const [expanded, setExpanded] = useState(true);  // 默认展开以显示工具调用详情
+  const [expanded, setExpanded] = useState(false);  // 默认收起，按需展开查看单条工具调用详情
 
   return (
     <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 dark:bg-blue-500/10 text-[14px]">
